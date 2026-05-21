@@ -1,0 +1,29 @@
+# Production Streamlit config for the Forecast Disaggregation Validator
+# Lives at .streamlit/config.toml — Streamlit picks it up automatically.
+
+[server]
+# Streamlit Cloud sets headless=true itself, but having it here means
+# local `streamlit run app.py` also runs headless (no auto-open browser).
+headless = true
+# Limit upload size to 200 MB. Your real input file is ~8 MB so this is
+# plenty of headroom while protecting against accidental huge uploads.
+maxUploadSize = 200
+
+[browser]
+# Don't ping Streamlit's telemetry on every run.
+gatherUsageStats = false
+
+[theme]
+# Match the navy/teal palette used in app.py's custom CSS so the chrome
+# (sidebar, buttons, widget controls) blends with the in-app styling.
+primaryColor = "#1F3864"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8F9FA"
+textColor = "#262730"
+font = "sans serif"
+
+[client]
+# Hide tracebacks from end users — they'll see a polite "something went
+# wrong" instead of a stack trace. Cloud logs still show the full trace
+# for the operator.
+showErrorDetails = false
