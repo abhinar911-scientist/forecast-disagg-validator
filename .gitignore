@@ -1,0 +1,75 @@
+# =============================================================================
+# CRITICAL: secrets.toml contains password hashes. NEVER commit it to GitHub.
+# These rules are belt-and-suspenders coverage.
+# =============================================================================
+.streamlit/secrets.toml
+**/.streamlit/secrets.toml
+secrets.toml
+**/secrets.toml
+
+# Keep the template — it's safe to share
+!.streamlit/secrets.toml.template
+!secrets.toml.template
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# =============================================================================
+# Test artifacts & local data
+# =============================================================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Don't commit input data files — they're customer data, not code
+*.xlsx
+*.xls
+*.csv
+*.parquet
+!secrets.toml.template
+
+# =============================================================================
+# Editors / OS
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Streamlit local cache
+# =============================================================================
+.streamlit/cache/
