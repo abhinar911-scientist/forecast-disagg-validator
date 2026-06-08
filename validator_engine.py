@@ -55,6 +55,13 @@ ALIAS_MAP = {
     'statistical forecast(kg)': 'Statistical Forecast(Kg)',
     'statistical forecast': 'Statistical Forecast(Kg)',
     'statistical forecast (kg)': 'Statistical Forecast(Kg)',
+    # "Committed" variant — some exports name the final forecast column
+    # "Statistical Forecast Committed (kg)". Treat it as the same forecast column
+    # so the header is always normalized to the canonical 'Statistical Forecast(Kg)'.
+    'statistical forecast committed (kg)': 'Statistical Forecast(Kg)',
+    'statistical forecast committed(kg)': 'Statistical Forecast(Kg)',
+    'statistical forecast committed': 'Statistical Forecast(Kg)',
+    'statistical forecast committed (kgs)': 'Statistical Forecast(Kg)',
     'forecast': 'Statistical Forecast(Kg)', 'forecast(kg)': 'Statistical Forecast(Kg)',
     'fcst': 'Statistical Forecast(Kg)',
     # Optional column aliases
@@ -103,12 +110,14 @@ class Settings:
             issues.append("Forecast window must be ≥ 1 month")
         if self.threshold < 0:
             issues.append("Threshold must be ≥ 0")
+        # Date-range sanity
         if self.recent_start is not None and self.recent_end is not None:
             if self.recent_start > self.recent_end:
                 issues.append("Recent History start date must be ≤ end date")
         if self.fcst_start is not None and self.fcst_end is not None:
             if self.fcst_start > self.fcst_end:
                 issues.append("Forecast Horizon start date must be ≤ end date")
+        # Half-set date ranges are invalid
         if (self.recent_start is None) != (self.recent_end is None):
             issues.append("Both Recent Start AND Recent End must be set, or neither")
         if (self.fcst_start is None) != (self.fcst_end is None):
@@ -154,13 +163,21 @@ def classify_flag(recent_kg: float, fcst_kg: float, deviation: float, threshold:
 # Input cleaning
 # ---------------------------------------------------------------------------
 def _normalize_header(h: str) -> str:
-    return str(h).strip().lower()
+    # Lowercase, strip, and collapse any internal runs of whitespace to a single
+    # space so headers like "Statistical Forecast  (kg)" (double space) still match.
+    return ' '.join(str(h).strip().lower().split())
 
 
 def normalize_columns(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     rename = {}
     seen = set()
-    for col in df.columns:
+    # Process non-"committed" headers first. If a file ever contains BOTH a
+    # standard forecast column AND a "Statistical Forecast Committed (kg)" column,
+    # the standard one claims the canonical name and the committed one is ignored.
+    # (sorted is stable, so original column order is preserved within each group.)
+    ordered_cols = sorted(df.columns,
+                          key=lambda c: 'committed' in _normalize_header(c))
+    for col in ordered_cols:
         canon = ALIAS_MAP.get(_normalize_header(col))
         if canon and canon not in seen:
             rename[col] = canon
@@ -204,6 +221,7 @@ def load_and_validate_input(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], 
     # Coerce optional columns to user-friendly forms
     if 'Arkieva Review Req' in df.columns:
         col_data = df['Arkieva Review Req']
+        # Map booleans / 0-1 / "True"-"False" / "Yes"-"No" all to the same Yes/No display
         def _to_yn(v):
             if pd.isna(v):
                 return 'Unknown'
@@ -212,6 +230,7 @@ def load_and_validate_input(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], 
                 return 'Yes'
             if s in ('false', '0', '0.0', 'no', 'n', 'f', ''):
                 return 'No'
+            # Anything else, keep as-is (preserves arbitrary categorical values)
             return str(v).strip()
         df['Arkieva Review Req'] = col_data.map(_to_yn)
 
@@ -221,6 +240,8 @@ def load_and_validate_input(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], 
     n_dups = df.duplicated(['Detail', 'Month']).sum()
     if n_dups > 0:
         warnings.append(f"{n_dups} duplicate (Detail, Month) rows — summing.")
+        # Build groupby keys (always include the optional column if present so it's
+        # preserved in the dedup; we take "first" for it)
         gb_keys = ['Business Line', 'Detail', 'Material', 'Ship To Sub Region',
                    'Parent Cust', 'Month']
         agg_spec = {'Sales History(Kg)': 'sum', 'Statistical Forecast(Kg)': 'sum'}
@@ -245,6 +266,11 @@ def load_and_validate_input(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], 
 def _build_validation(df: pd.DataFrame, child_keys: List[str], parent_keys: List[str],
                       rec_slice: pd.DataFrame, fcst_slice: pd.DataFrame,
                       threshold: float) -> pd.DataFrame:
+    """Build a validation dataframe at the given grain.
+
+    child_keys: e.g. ['Material', 'Ship To Sub Region', 'Parent Cust']
+    parent_keys: e.g. ['Material', 'Ship To Sub Region']
+    """
     child_recent = (rec_slice.groupby(child_keys, as_index=False)['Sales History(Kg)']
                     .sum().rename(columns={'Sales History(Kg)': 'Recent Hist (Kg)'}))
     child_fcst = (fcst_slice.groupby(child_keys, as_index=False)['Statistical Forecast(Kg)']
@@ -254,7 +280,9 @@ def _build_validation(df: pd.DataFrame, child_keys: List[str], parent_keys: List
     parent_fcst = (fcst_slice.groupby(parent_keys, as_index=False)['Statistical Forecast(Kg)']
                    .sum().rename(columns={'Statistical Forecast(Kg)': 'Parent Forecast (Kg)'}))
 
+    # Universe of child combos = anything that ever appears in the input
     all_children = df[child_keys].drop_duplicates().reset_index(drop=True)
+
     val = (all_children
            .merge(child_recent, on=child_keys, how='left')
            .merge(child_fcst, on=child_keys, how='left')
@@ -271,6 +299,7 @@ def _build_validation(df: pd.DataFrame, child_keys: List[str], parent_keys: List
                                       val['Forecast (Kg)'] / val['Parent Forecast (Kg)'], 0.0)
     val['Mix Deviation'] = val['Forecast Mix %'] - val['Recent Mix %']
 
+    # Kg Impact: absolute volume impact of the misallocation.
     impact_base = np.where(val['Parent Forecast (Kg)'] > 0,
                             val['Parent Forecast (Kg)'],
                             val['Parent Recent (Kg)'])
@@ -280,6 +309,7 @@ def _build_validation(df: pd.DataFrame, child_keys: List[str], parent_keys: List
                    for r, f, d in zip(val['Recent Hist (Kg)'],
                                       val['Forecast (Kg)'],
                                       val['Mix Deviation'])]
+    # Override Kg Impact for special flags
     val.loc[val['Flag'] == 'Lost Forecast', 'Kg Impact'] = val.loc[val['Flag'] == 'Lost Forecast', 'Recent Hist (Kg)']
     val.loc[val['Flag'] == 'New Demand', 'Kg Impact'] = val.loc[val['Flag'] == 'New Demand', 'Forecast (Kg)']
     val.loc[val['Flag'] == 'No Activity', 'Kg Impact'] = 0.0
@@ -295,12 +325,19 @@ def run_validation(df: pd.DataFrame, settings: Settings) -> ValidationResult:
     if issues:
         raise ValueError(f"Settings invalid: {'; '.join(issues)}")
 
+    # Date anchors (always derived from the input data)
     hist_mask = df['Sales History(Kg)'] > 0
     fcst_only_mask = (df['Sales History(Kg)'] == 0) & (df['Statistical Forecast(Kg)'] > 0)
     last_hist_date = df.loc[hist_mask, 'Month'].max()
+    # Forecast horizon anchor = months strictly AFTER last_hist_date.
+    # We don't trust the "first forecast date" detected from data because some past
+    # months (when a Detail had no history yet) also have non-zero forecast — those
+    # are not part of the planner's current forward forecast.
     first_fcst_date = (last_hist_date + relativedelta(months=1))
     last_fcst_date = df.loc[fcst_only_mask & (df['Month'] >= first_fcst_date), 'Month'].max()
 
+    # ---- Resolve the recent and forecast windows ----
+    # Priority: explicit dates > month-count defaults.
     if settings.recent_start is not None and settings.recent_end is not None:
         rec_start = pd.Timestamp(settings.recent_start).to_period('M').to_timestamp()
         rec_end = pd.Timestamp(settings.recent_end).to_period('M').to_timestamp()
@@ -320,12 +357,14 @@ def run_validation(df: pd.DataFrame, settings: Settings) -> ValidationResult:
     fcst_slice = df[(df['Month'] >= fc_start) & (df['Month'] <= fc_end) &
                     (df['Statistical Forecast(Kg)'] > 0)]
 
+    # ---- Validation at child grain (Mat × SubRegion × Cust) ----
     val = _build_validation(df,
                             child_keys=['Material', 'Ship To Sub Region', 'Parent Cust'],
                             parent_keys=['Material', 'Ship To Sub Region'],
                             rec_slice=rec_slice, fcst_slice=fcst_slice,
                             threshold=settings.threshold)
 
+    # Add Business Line + #Details for context
     bl_map = (df.sort_values('Month')
                 .groupby(['Material', 'Ship To Sub Region', 'Parent Cust'])['Business Line']
                 .first().reset_index())
@@ -335,6 +374,7 @@ def run_validation(df: pd.DataFrame, settings: Settings) -> ValidationResult:
                    .reset_index().rename(columns={'Detail': '# Details'}))
     val = val.merge(n_details, on=['Material', 'Ship To Sub Region', 'Parent Cust'], how='left')
 
+    # Optional: propagate Arkieva Review Req if present (first-seen per child combo)
     has_arkieva = 'Arkieva Review Req' in df.columns
     if has_arkieva:
         ark_map = (df.sort_values('Month')
@@ -352,6 +392,7 @@ def run_validation(df: pd.DataFrame, settings: Settings) -> ValidationResult:
                             'Mix Deviation', 'Kg Impact', 'Flag']]
     val = val.sort_values(['Material', 'Ship To Sub Region', 'Parent Cust']).reset_index(drop=True)
 
+    # ---- Material × Parent Cust ROLLUP (parent = Material alone) ----
     rl = _build_validation(df,
                            child_keys=['Material', 'Parent Cust'],
                            parent_keys=['Material'],
@@ -362,6 +403,9 @@ def run_validation(df: pd.DataFrame, settings: Settings) -> ValidationResult:
               .reset_index().rename(columns={'Ship To Sub Region': '# SubRegions'}))
     rl = rl.merge(n_sr, on=['Material', 'Parent Cust'], how='left')
 
+    # Propagate Arkieva at rollup grain too (any-True wins, since rollup spans
+    # multiple SubRegions and "review required" should bubble up if anything inside
+    # needs review)
     if has_arkieva:
         ark_rollup = (df.assign(_ark_yes=df['Arkieva Review Req'].eq('Yes'))
                         .groupby(['Material', 'Parent Cust'])
@@ -379,11 +423,13 @@ def run_validation(df: pd.DataFrame, settings: Settings) -> ValidationResult:
                              'Mix Deviation', 'Kg Impact', 'Flag']]
     rl = rl.sort_values(['Material', 'Parent Cust']).reset_index(drop=True)
 
+    # ---- Monthly pivot for time-series viz ----
     df_p = df.copy()
     df_p['Type'] = np.where(df_p['Sales History(Kg)'] > 0, 'History',
-                  np.where(df_p['Statistical Forecast(Kg)'] > 0, 'Forecast', 'Empty'))
+                    np.where(df_p['Statistical Forecast(Kg)'] > 0, 'Forecast', 'Empty'))
     pivot = df_p[df_p['Type'] != 'Empty'].copy()
 
+    # ---- Meta ----
     flag_counts = val['Flag'].value_counts().to_dict()
     rollup_flag_counts = rl['Flag'].value_counts().to_dict()
     meta = {
